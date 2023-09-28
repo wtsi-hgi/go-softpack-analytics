@@ -1,9 +1,37 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *	- Sendu Bala <sb10@sanger.ac.uk>
+ *	- Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package main
 
 import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -18,10 +46,13 @@ func main() {
 }
 
 func run() error {
-	var port, server uint64
+	var (
+		port   uint64
+		output string
+	)
 
 	flag.Uint64Var(&port, "p", 1234, "port to listen on for analytics")
-	flag.Uint64Var(&server, "l", 12345, "port to listen on for web server")
+	flag.StringVar(&output, "o", "-", "output file (- is STDOUT)")
 
 	flag.Parse()
 
@@ -32,35 +63,46 @@ func run() error {
 		return err
 	}
 
-	sl, err := net.ListenTCP("tcp", &net.TCPAddr{
-		Port: int(server),
-	})
-	if err != nil {
-		return err
+	var f *os.File
+
+	if output == "-" {
+		f = os.Stdout
+	} else {
+		f, err = os.Create(output)
+		if err != nil {
+			return err
+		}
 	}
 
-	return newAnalyticsServer(al, sl)
+	defer f.Close()
+
+	return newAnalyticsServer(al, f)
 }
 
-func newAnalyticsServer(al, sl *net.TCPListener) error {
-	// TODO: Start http server
-
+func newAnalyticsServer(al *net.TCPListener, f io.Writer) error {
 	for {
 		c, err := al.AcceptTCP()
 		if err != nil {
 			return err
 		}
 
-		go handleAnalytics(c)
+		go handleAnalytics(c, f)
 	}
 }
 
 type Analytic struct {
 	Name, Command, IP string
-	Time              int64
+	Time              time.Time
 }
 
-func handleAnalytics(c *net.TCPConn) {
+func (a *Analytic) WriteTo(f io.Writer) (int64, error) {
+	n, err := fmt.Fprintf(f, "%s\t%q\t%s\t%s\n",
+		a.Time.Format(time.DateTime), a.Command, a.Name, a.IP)
+
+	return int64(n), err
+}
+
+func handleAnalytics(c *net.TCPConn, f io.Writer) {
 	var sb strings.Builder
 
 	if _, err := io.Copy(&sb, io.LimitReader(c, 4096)); err != nil {
@@ -75,10 +117,15 @@ func handleAnalytics(c *net.TCPConn) {
 
 	ra := c.RemoteAddr().(*net.TCPAddr)
 
-	fmt.Println(Analytic{
-		Name:    parts[0],
-		Command: parts[1],
+	a := Analytic{
+		Name:    strings.TrimSpace(parts[0]),
+		Command: strings.TrimSpace(parts[1]),
 		IP:      ra.IP.String(),
-		Time:    time.Now().Unix(),
-	})
+		Time:    time.Now(),
+	}
+
+	_, err := a.WriteTo(f)
+	if err != nil {
+		slog.Error("error writing to output file", "err", err)
+	}
 }

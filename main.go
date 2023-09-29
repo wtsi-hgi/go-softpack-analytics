@@ -68,7 +68,7 @@ func run() error {
 	if output == "-" {
 		f = os.Stdout
 	} else {
-		f, err = os.Create(output)
+		f, err = os.OpenFile(output, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0755)
 		if err != nil {
 			return err
 		}

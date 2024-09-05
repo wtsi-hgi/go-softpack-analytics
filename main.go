@@ -76,6 +76,7 @@ func run() error {
 
 	slog.Info("Server Started…")
 	defer slog.Info("…Server Stopped")
+	defer db.Close()
 
 	return newAnalyticsServer(al, db)
 }

@@ -93,3 +93,7 @@ func (d *DB) SaveTo(path string) error {
 
 	return err
 }
+
+func (d *DB) Close() error {
+	return d.db.Close()
+}

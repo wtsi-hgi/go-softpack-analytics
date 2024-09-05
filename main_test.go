@@ -28,7 +28,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -42,9 +41,12 @@ func TestNewAnalyticsServer(t *testing.T) {
 		t.Fatalf("unexpected error creating listener: %s", err)
 	}
 
-	var sb strings.Builder
+	db, err := NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
 
-	go newAnalyticsServer(l, &sb)
+	go newAnalyticsServer(l, db)
 
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
@@ -65,9 +67,9 @@ func TestNewAnalyticsServer(t *testing.T) {
 
 	time.Sleep(250 * time.Millisecond)
 
-	expected := fmt.Sprintf("%q\t%s", command, user)
+	expectedPrefix := "USER,/path/to/some/command," + c.LocalAddr().(*net.TCPAddr).IP.String() + ","
 
-	if out := sb.String(); !strings.Contains(out, expected) {
-		t.Errorf("%q did not contain %q", out, expected)
+	if out := dumpTable(t, db, "events"); !strings.HasPrefix(out, expectedPrefix) {
+		t.Errorf("expecting output to begin with %q, got %q", expectedPrefix, out)
 	}
 }

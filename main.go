@@ -28,13 +28,20 @@
 package main
 
 import (
+	"compress/gzip"
+	"encoding/csv"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -46,63 +53,62 @@ func main() {
 }
 
 func run() error {
-	var (
-		port   uint64
-		output string
-	)
-
-	flag.Uint64Var(&port, "p", 1234, "port to listen on for analytics")
-	flag.StringVar(&output, "o", "-", "output file (- is STDOUT)")
-
+	port := flag.Uint64("p", 1234, "port to listen on for analytics")
+	output := flag.String("d", "", "db file")
+	tsv := flag.String("t", "", "import file")
 	flag.Parse()
 
-	al, err := net.ListenTCP("tcp", &net.TCPAddr{
-		Port: int(port),
-	})
-	if err != nil {
-		return err
-	}
-
-	var f *os.File
-
-	if output == "-" {
-		f = os.Stdout
-	} else {
-		f, err = os.OpenFile(output, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0755)
-		if err != nil {
+	if *tsv != "" {
+		if err := importAndSaveData(*tsv, *output); err != nil {
 			return err
 		}
 	}
 
-	defer f.Close()
+	al, err := net.ListenTCP("tcp", &net.TCPAddr{Port: int(*port)})
+	if err != nil {
+		return err
+	}
 
-	return newAnalyticsServer(al, f)
+	db, err := NewDB(*output)
+	if err != nil {
+		return fmt.Errorf("error opening database (%s): %w", *output, err)
+	}
+
+	slog.Info("Server Started…")
+	defer slog.Info("…Server Stopped")
+
+	return newAnalyticsServer(al, db)
 }
 
-func newAnalyticsServer(al *net.TCPListener, f io.Writer) error {
+func newAnalyticsServer(al *net.TCPListener, db *DB) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+		<-sig
+
+		al.Close()
+	}()
+
 	for {
 		c, err := al.AcceptTCP()
 		if err != nil {
 			return err
 		}
 
-		go handleAnalytics(c, f)
+		wg.Add(1)
+
+		go handleAnalytics(c, db, &wg)
 	}
 }
 
-type Analytic struct {
-	Name, Command, IP string
-	Time              time.Time
-}
+func handleAnalytics(c *net.TCPConn, db *DB, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-func (a *Analytic) WriteTo(f io.Writer) (int64, error) {
-	n, err := fmt.Fprintf(f, "%s\t%q\t%s\t%s\n",
-		a.Time.Format(time.DateTime), a.Command, a.Name, a.IP)
-
-	return int64(n), err
-}
-
-func handleAnalytics(c *net.TCPConn, f io.Writer) {
 	var sb strings.Builder
 
 	if _, err := io.Copy(&sb, io.LimitReader(c, 4096)); err != nil {
@@ -115,17 +121,102 @@ func handleAnalytics(c *net.TCPConn, f io.Writer) {
 		return
 	}
 
-	ra := c.RemoteAddr().(*net.TCPAddr)
+	username := strings.TrimSpace(parts[0])
+	command := strings.TrimSpace(parts[1])
+	ip := c.RemoteAddr().(*net.TCPAddr).IP
 
-	a := Analytic{
-		Name:    strings.TrimSpace(parts[0]),
-		Command: strings.TrimSpace(parts[1]),
-		IP:      ra.IP.String(),
-		Time:    time.Now(),
+	if err := db.Add(username, command, moduleFromCommand(command), ip.String(), time.Now()); err != nil {
+		slog.Error("error writing to database", "err", err)
+	}
+}
+
+func moduleFromCommand(command string) string {
+	module := filepath.Dir(command)
+	module = strings.TrimPrefix(module, "/software/hgi/softpack/installs/")
+	module = strings.TrimPrefix(module, "/software/hgi/installs/")
+	module = strings.TrimSuffix(module, "-scripts")
+
+	if module == "." || strings.HasPrefix(module, "conda-audited") || strings.HasPrefix(module, "micromamba") || strings.HasPrefix(module, "/nfs/users/nfs_s/sb10/src/hgi/conda-audited") {
+		return ""
 	}
 
-	_, err := a.WriteTo(f)
+	return module
+}
+
+func importAndSaveData(tsv, output string) error {
+	db, err := NewDB(":memory:")
 	if err != nil {
-		slog.Error("error writing to output file", "err", err)
+		return fmt.Errorf("error opening in-memory db: %w", err)
+	}
+
+	slog.Info("Importing…")
+	if err := importData(db, tsv); err != nil {
+		return fmt.Errorf("error importing data: %w", err)
+	}
+
+	slog.Info("Exporting…")
+
+	if err := db.SaveTo(output); err != nil {
+		return fmt.Errorf("error exporting in-memory db to disk: %w", err)
+	}
+
+	slog.Info("…Done")
+
+	return nil
+}
+
+func importData(db *DB, path string) error {
+	var r io.Reader
+
+	if path == "-" {
+		r = os.Stdin
+	} else {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+
+		defer f.Close()
+
+		if strings.HasSuffix(path, ".gz") {
+			if r, err = gzip.NewReader(f); err != nil {
+				return fmt.Errorf("failed to read gzip compressed input: %w", err)
+			}
+		} else {
+			r = f
+		}
+	}
+
+	return readCSVIntoDB(csv.NewReader(r), db)
+}
+
+func readCSVIntoDB(reader *csv.Reader, db *DB) error {
+	reader.Comma = '\t'
+	count := 0
+
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return err
+		} else if len(row) < 4 {
+			continue
+		}
+
+		date, command, user, ip := row[0], row[1], row[2], row[3]
+
+		d, err := time.Parse(time.DateTime, date)
+		if err != nil {
+			continue
+		} else if err = db.Add(user, command, moduleFromCommand(command), ip, d); err != nil {
+			return fmt.Errorf("error adding to database: %w", err)
+		}
+
+		count++
+
+		if count%1000 == 0 {
+			fmt.Printf("\r%d", count)
+		}
 	}
 }

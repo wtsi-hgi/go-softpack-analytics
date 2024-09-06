@@ -31,7 +31,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type DB struct {
@@ -41,10 +41,12 @@ type DB struct {
 }
 
 func NewDB(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("error opening database: %w", err)
 	}
+
+	db.SetMaxOpenConns(1)
 
 	for _, table := range [...]string{
 		`CREATE TABLE IF NOT EXISTS [events] (username TEXT, command string, ip string, time INTEGER)`,

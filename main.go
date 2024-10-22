@@ -56,10 +56,15 @@ func run() error {
 	port := flag.Uint64("p", 1234, "port to listen on for analytics")
 	output := flag.String("d", "", "db file")
 	tsv := flag.String("t", "", "import file")
+	sqlite := flag.String("s", "", "import database")
 	flag.Parse()
 
 	if *tsv != "" {
 		if err := importAndSaveData(*tsv, *output); err != nil {
+			return err
+		}
+	} else if *sqlite != "" {
+		if err := importDBAndSaveData(*sqlite, *output); err != nil {
 			return err
 		}
 	}
@@ -126,19 +131,70 @@ func handleAnalytics(c *net.TCPConn, db *DB, wg *sync.WaitGroup) {
 	command := strings.TrimSpace(parts[1])
 	ip := c.RemoteAddr().(*net.TCPAddr).IP
 
-	if err := db.Add(username, command, moduleFromCommand(command), ip.String(), time.Now()); err != nil {
+	if err := addToDB(db, username, command, ip.String(), time.Now().Unix()); err != nil {
 		slog.Error("error writing to database", "err", err)
 	}
 }
 
-func moduleFromCommand(command string) string {
-	module := filepath.Dir(command)
-	module = strings.TrimPrefix(module, "/software/hgi/softpack/installs/")
-	module = strings.TrimPrefix(module, "/software/hgi/installs/")
-	module = strings.TrimSuffix(module, "-scripts")
+func addToDB(db *DB, username, command, ip string, now int64) error {
+	adder := db.AddEvent
+	var module string
 
-	if module == "." || strings.HasPrefix(module, "conda-audited") || strings.HasPrefix(module, "micromamba") || strings.HasPrefix(module, "/nfs/users/nfs_s/sb10/src/hgi/conda-audited") {
+	mod := moduleFromCommand(command)
+	switch mod := mod.(type) {
+	case SoftPackModule:
+		adder = db.AddSoftpack
+		module = string(mod)
+	case CondaModule:
+		adder = db.AddConda
+		module = string(mod)
+	case OtherModule:
+		adder = db.AddOther
+		module = string(mod)
+	}
+
+	if err := adder(username, command, module, ip, now); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type SoftPackModule string
+
+type CondaModule string
+
+type OtherModule string
+
+func moduleFromCommand(command string) any {
+	if command == "/software/hgi/installs/conda-audited/miniconda/bin/conda shell.bash hook" {
 		return ""
+	}
+
+	if strings.HasPrefix(command, "/software/hgi/installs/conda-audited/miniconda/bin/conda shell.posix activate ") {
+		if pos := strings.Index(command, "/.snakemake/conda/"); pos != -1 {
+			command = command[:pos]
+		}
+
+		return CondaModule(strings.TrimPrefix(command, "/software/hgi/installs/conda-audited/miniconda/bin/conda shell.posix activate "))
+	}
+
+	if strings.HasPrefix(command, "/software/hgi/installs/conda-audited/") {
+		return OtherModule("conda-audited")
+	}
+
+	if strings.HasPrefix(command, "/software/hgi/installs/micromamba/micromamba") {
+		return OtherModule("micromamba")
+	}
+
+	module := filepath.Dir(command)
+
+	if strings.HasPrefix(module, "/software/hgi/softpack/installs/") {
+		return SoftPackModule(strings.TrimPrefix(strings.TrimSuffix(module, "-scripts"), "/software/hgi/softpack/installs/"))
+	}
+
+	if strings.HasPrefix(module, "/software/hgi/installs/") {
+		return OtherModule(strings.TrimPrefix(strings.TrimSuffix(module, "-scripts"), "/software/hgi/installs/"))
 	}
 
 	return module
@@ -210,7 +266,7 @@ func readCSVIntoDB(reader *csv.Reader, db *DB) error {
 		d, err := time.Parse(time.DateTime, date)
 		if err != nil {
 			continue
-		} else if err = db.Add(user, command, moduleFromCommand(command), ip, d); err != nil {
+		} else if err = addToDB(db, user, command, ip, d.Unix()); err != nil {
 			return fmt.Errorf("error adding to database: %w", err)
 		}
 
@@ -220,4 +276,52 @@ func readCSVIntoDB(reader *csv.Reader, db *DB) error {
 			fmt.Printf("\r%d", count)
 		}
 	}
+}
+
+func importDBAndSaveData(db, path string) error {
+	in, err := NewDB(db)
+	if err != nil {
+		return fmt.Errorf("error opening input database: %w", err)
+	}
+
+	out, err := NewDB(":memory:")
+	if err != nil {
+		return fmt.Errorf("error opening memory database: %w", err)
+	}
+
+	rows, err := in.ReadEvents()
+	if err != nil {
+		return fmt.Errorf("error reading database: %w", err)
+	}
+
+	defer rows.Close()
+
+	count := 0
+
+	for rows.Next() {
+		var (
+			username, command, ip string
+			now                   int64
+		)
+
+		if err := rows.Scan(&username, &command, &ip, &now); err != nil {
+			return fmt.Errorf("error reading row: %w", err)
+		}
+
+		if err := addToDB(out, username, command, ip, now); err != nil {
+			return fmt.Errorf("error adding to database: %w", err)
+		}
+
+		count++
+
+		if count%1000 == 0 {
+			fmt.Printf("\r%d", count)
+		}
+	}
+
+	if err := out.SaveTo(path); err != nil {
+		return fmt.Errorf("error saving database: %w", err)
+	}
+
+	return nil
 }

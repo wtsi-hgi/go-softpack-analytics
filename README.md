@@ -6,11 +6,12 @@ This package provides a simple server that listens on a port for simple analytic
 
 The server takes the following arguments:
 
-|   Argument   |   Default   |  Description                      |
-|--------------|-------------|-----------------------------------|
-| -p           | 1234        | The TCP port to listen on.        |
-| -d           |             | DB file to write to.              |
-| -t           |             | TSV file to import into database. |
+|   Argument   |   Default   |  Description                                |
+|--------------|-------------|---------------------------------------------|
+| -p           | 1234        | The TCP port to listen on.                  |
+| -d           |             | DB file to write to.                        |
+| -t           |             | TSV file to import into database.           |
+| -s           |             | Existing sqlite db to import into database. |
 
 NB: TSV file import is to import flatfile database created with earlier version of this program.
 
@@ -27,16 +28,7 @@ events:
 | ip         | String   | The IP Address on which the executable was ran.                                           |
 | time       | Integer  | The Unix timestamp (Seconds since 1970-01-01 00:00:00 UTC) when the command was executed. |
 
-modules:
-
-|   Column   |   Type   |   Description                                         |
-|------------|----------|-------------------------------------------------------|
-| module     | String   | Module that executable is determined to be a part of. |
-| count      | Integer  | Number of times that this module has been used.       |
-| firstuse   | Integer  | Unix timestamp of the earliest use of the module.     |
-| lastuse    | Integer  | Unix timestamp of the latest used of the module.      |
-
-usermodules:
+softpackmodules/condamodules/othermodules:
 
 |   Column   |   Type   |   Description                                                  |
 |------------|----------|----------------------------------------------------------------|

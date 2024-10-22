@@ -133,7 +133,7 @@ func TestDB(t *testing.T) {
 				"moduleB,userB,2,1,5\n",
 		},
 	} {
-		if err := db.Add(test.Username, test.Command, test.Module, test.IP.String(), test.Time); err != nil {
+		if err := db.AddOther(test.Username, test.Command, test.Module, test.IP.String(), test.Time.Unix()); err != nil {
 			t.Errorf("test %d: unexpected error adding event: %s", n+1, err)
 
 			continue
@@ -141,9 +141,7 @@ func TestDB(t *testing.T) {
 
 		if evtable := dumpTable(t, db, "events"); evtable != test.ExpectedEvents {
 			t.Errorf("test %d: expected events table to be:\n%s\ngot:\n%s", n+1, test.ExpectedEvents, evtable)
-		} else if mdtable := dumpTable(t, db, "modules"); mdtable != test.ExpectedModules {
-			t.Errorf("test %d: expected modules table to be:\n%s\ngot:\n%s", n+1, test.ExpectedModules, mdtable)
-		} else if umtable := dumpTable(t, db, "usermodules"); umtable != test.ExpectedUserModules {
+		} else if umtable := dumpTable(t, db, "othermodules"); umtable != test.ExpectedUserModules {
 			t.Errorf("test %d: expected usermodules table to be:\n%s\ngot:\n%s", n+1, test.ExpectedUserModules, umtable)
 		}
 	}

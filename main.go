@@ -179,6 +179,14 @@ func moduleFromCommand(command string) any {
 		return CondaModule(strings.TrimPrefix(command, "/software/hgi/installs/conda-audited/miniconda/bin/conda shell.posix activate "))
 	}
 
+	if strings.HasPrefix(command, "/software/hgi/installs/conda-audited/miniforge/bin/conda shell.posix activate ") {
+		if pos := strings.Index(command, "/.snakemake/conda/"); pos != -1 {
+			command = command[:pos]
+		}
+
+		return CondaModule(strings.TrimPrefix(command, "/software/hgi/installs/conda-audited/miniforge/bin/conda shell.posix activate "))
+	}
+
 	if strings.HasPrefix(command, "/software/hgi/installs/conda-audited/") {
 		return OtherModule("conda-audited")
 	}
@@ -254,6 +262,8 @@ func readCSVIntoDB(reader *csv.Reader, db *DB) error {
 	for {
 		row, err := reader.Read()
 		if errors.Is(err, io.EOF) {
+			fmt.Printf("\r%d\n", count)
+
 			return nil
 		} else if err != nil {
 			return err
@@ -318,6 +328,8 @@ func importDBAndSaveData(db, path string) error {
 			fmt.Printf("\r%d", count)
 		}
 	}
+
+	fmt.Printf("\r%d\n", count)
 
 	if err := out.SaveTo(path); err != nil {
 		return fmt.Errorf("error saving database: %w", err)
